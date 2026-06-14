@@ -1,6 +1,6 @@
 ---
 name: kindle-capture
-description: Kindle Web Reader/Kindle macOSアプリからスクリーンショットをキャプチャしてPDF生成。書籍名やASIN指定でKindle本を自動PDF化。Kindleライブラリ検索、Playwrightでページ自動取得、PNG画像からPDF変換、レイアウト設定（single/double）、範囲指定、品質調整、リサイズに対応。タイトル取得に失敗した場合は表紙キャプチャをAIで視認して命名する。
+description: Kindle Web Reader/Kindle macOSアプリからスクリーンショットをキャプチャしてPDF生成。書籍名やASIN指定でKindle本を自動PDF化。Kindleライブラリ検索、Playwrightでページ自動取得、PNG画像からPDF変換、レイアウト設定（single/double）、範囲指定、品質調整、リサイズに対応。タイトル取得に失敗した場合は表紙キャプチャをAIで視認して命名する。PDF生成完了後は既定で `to-md` Skill にチェーンし、`_outputs/to-md/<書名>.md` まで一気通貫で出力する（ユーザーが明示拒否した場合のみ PDF で停止）。
 ---
 
 # Kindle Capture Skill
@@ -18,13 +18,18 @@ Kindle Web Readerから書籍のスクリーンショットを自動取得し、
   - `capture_cover.py --json` → `view_image`で表紙タイトル確認 → 取得タイトルを `--book` に使用
 - 取得に失敗・判別不能な場合のみ、最小限の確認を行う。
 - **PDF生成前に、`src/dedupe_tail.py` で巻末末尾の重複ページを必ず検出・削除する**（末尾の連続ページで同一画像が続く場合は重複として除去する）。
-- **PDF生成後は、親フォルダを日本語の書籍タイトル名にし、その直下にPDFと画像フォルダを配置してGoogle Driveへ必ず移動する**（`/Users/tsunoda/Library/CloudStorage/GoogleDrive-tsunoda799@gmail.com/マイドライブ/Kindle`）。
+- **PDF生成後は、親フォルダを日本語の書籍タイトル名にし、その直下にPDFと画像フォルダを配置して `_outputs/kindle-capture/` へ必ず移動する**（`~/Workspace/_outputs/kindle-capture`）。
+- **PDF 生成・`_outputs/kindle-capture/` 配置が終わった直後、to-md Skill を既定で起動する**（opt-out 方式）。`/to-md "<生成した PDF のフルパス>"` を呼び、`_outputs/to-md/<書名>.md` を生成する。実行前に日本語 1 文で「続けて to-md で Markdown 化します」と宣言する。ユーザーが直前メッセージで「MD不要 / PDFだけ / Markdownはいい / テキスト化不要」等を明示している場合のみスキップ。
+- to-md は画像 PDF を Tesseract OCR で処理する（既定 `--lang auto`）。300 ページ超の書籍は kindle-capture の 20〜30 分に **OCR 追加 5〜15 分** が乗る前提でタイムアウトを設定しない。
+- **完了報告では PDF と MD の両フルパスを並記する**（チェーン実行時）。MD 冒頭 frontmatter の `ocr_lang` が想定と違っていたら、`/to-md "<pdf>" --lang jpn_vert+jpn+eng --psm 5` で再実行する手順を案内する。
+- **PDF パスに半角スペースが含まれる場合**（Dropbox パス等）は、`/to-md` の引数を必ず `"..."` で囲う。
 
 ## タイムアウトの目安
 
 - 300ページ超の書籍は、一般的に約20分かかります。短いタイムアウト設定は避けてください。
 - **エージェントはコマンド実行のタイムアウトを設定しない**（ツール側のtimeoutも指定しない）。完走まで待機する。
 - 例外的に上限が必要な場合は、**ユーザー合意の上で**十分長い値（目安30分以上）を設定する。
+- to-md チェーンを含めると 300 ページ超で **+5〜15 分** 上乗せされる前提でも、タイムアウトは引き続き設定しない。
 
 ## 前提条件
 
@@ -39,7 +44,7 @@ Kindle Web Readerから書籍のスクリーンショットを自動取得し、
 ## セットアップ
 
 ```bash
-cd /Users/tsunoda/Development/kindle-app
+cd ~/Workspace/_tools/kindle-app  # sasaki-ta-instyle/kindle-app の clone。venv は既存（再構築は下記の `python3 -m venv venv && pip install -r requirements.txt`）
 
 # 仮想環境を作成（初回のみ）
 python3 -m venv venv
@@ -92,15 +97,41 @@ python src/dedupe_tail.py --input ./kindle-captures/<ASIN>/trimmed/
 python src/create_pdf.py --input ./kindle-captures/<ASIN>/trimmed/
 ```
 
-### ステップ5: Google Driveへ移動（必須 / 親フォルダ=書籍タイトル）
+### ステップ5: `_outputs/kindle-capture/` へ移動（必須 / PDF だけ）
 
 ```bash
-mkdir -p "/Users/tsunoda/Library/CloudStorage/GoogleDrive-tsunoda799@gmail.com/マイドライブ/Kindle/<BOOK_TITLE>"
-mv "<PDF_PATH>" "/Users/tsunoda/Library/CloudStorage/GoogleDrive-tsunoda799@gmail.com/マイドライブ/Kindle/<BOOK_TITLE>/<BOOK_TITLE>.pdf"
-mv "./kindle-captures/<CAPTURE_DIR>/" "/Users/tsunoda/Library/CloudStorage/GoogleDrive-tsunoda799@gmail.com/マイドライブ/Kindle/<BOOK_TITLE>/画像_<RUN_ID>"
+mkdir -p "~/Workspace/_outputs/kindle-capture/<BOOK_TITLE>"
+mv "<PDF_PATH>" "~/Workspace/_outputs/kindle-capture/<BOOK_TITLE>/<BOOK_TITLE>.pdf"
+# 元画像は ~/Workspace/_tools/kindle-app/kindle-captures/<CAPTURE_DIR>/ にそのまま残す
+# （再トリミング・再 PDF 化のときの元データとして保持）
 ```
 
-トリミング後の画像からPDFを生成します。**必ず `/trimmed/` ディレクトリを指定してください。**
+### ステップ6: to-md で Markdown 化（既定実行 / opt-out）
+
+PDF の最終配置が終わったら、ユーザーが MD 不要を明示していない限り、続けて to-md Skill を呼ぶ。実行前に日本語 1 文で「続けて to-md で Markdown 化します」と宣言する。
+
+呼び出し（Skill 経由 / パスは必ず `"..."` で囲う）:
+
+```
+/to-md "~/Workspace/_outputs/kindle-capture/<BOOK_TITLE>/<BOOK_TITLE>.pdf"
+```
+
+出力先:
+
+```
+~/Workspace/_outputs/to-md/<BOOK_TITLE>.md
+~/Workspace/_outputs/to-md/<BOOK_TITLE>.assets/page-NNN.png
+```
+
+スキップ条件: ユーザーが直前メッセージで「MD不要 / PDFだけ / Markdownはいい / テキスト化不要」等を明示している場合のみ。
+
+OCR 言語の補正: MD 冒頭の frontmatter `ocr_lang` を確認し、想定と違っていたら（縦書きと横書きの混在書籍など）以下で再実行する。
+
+```
+/to-md "<同じ PDF パス>" --lang jpn_vert+jpn+eng --psm 5
+```
+
+完了報告: PDF と MD の両フルパスを並記する。
 
 ## ローカル（Kindle macOSアプリ）
 
@@ -125,9 +156,11 @@ python src/capture_app.py --book "<BOOK_TITLE>"
 # 末尾の重複ページを削除してからPDF生成（スクリプト使用）
 python src/dedupe_tail.py --input ./kindle-captures/<BOOK_TITLE>/
 python src/create_pdf.py --input ./kindle-captures/<BOOK_TITLE>/
-# PDF生成後にGoogle Driveへ移動（PDF+画像フォルダ）
-mv "./<BOOK_TITLE>.pdf" "/Users/tsunoda/Library/CloudStorage/GoogleDrive-tsunoda799@gmail.com/マイドライブ/Kindle/<BOOK_TITLE>/<BOOK_TITLE>.pdf"
-mv "./kindle-captures/<BOOK_TITLE>/" "/Users/tsunoda/Library/CloudStorage/GoogleDrive-tsunoda799@gmail.com/マイドライブ/Kindle/<BOOK_TITLE>/画像_<RUN_ID>"
+# PDF生成後に _outputs/kindle-capture/ へ移動（PDFだけ）
+mv "./<BOOK_TITLE>.pdf" "~/Workspace/_outputs/kindle-capture/<BOOK_TITLE>/<BOOK_TITLE>.pdf"
+# 元画像は kindle-app/kindle-captures/<BOOK_TITLE>/ にそのまま残す（再生成時の元データ）
+# to-md チェーン（既定実行 / opt-out）— ユーザーが MD 不要を明示していない限り続けて呼ぶ
+/to-md "~/Workspace/_outputs/kindle-capture/<BOOK_TITLE>/<BOOK_TITLE>.pdf"
 ```
 
 ## コマンドオプション
@@ -209,10 +242,13 @@ python src/dedupe_tail.py --input ./kindle-captures/B0DSKPTJM5/trimmed/
 # 6. PDF生成（トリミング後の画像から）
 python src/create_pdf.py --input ./kindle-captures/B0DSKPTJM5/trimmed/
 
-# 7. Google Driveへ移動（日本語ディレクトリ名・ファイル名）
-mkdir -p "/Users/tsunoda/Library/CloudStorage/GoogleDrive-tsunoda799@gmail.com/マイドライブ/Kindle/<BOOK_TITLE>"
-mv "./<BOOK_TITLE>.pdf" "/Users/tsunoda/Library/CloudStorage/GoogleDrive-tsunoda799@gmail.com/マイドライブ/Kindle/<BOOK_TITLE>/<BOOK_TITLE>.pdf"
-mv "./kindle-captures/<BOOK_TITLE>/" "/Users/tsunoda/Library/CloudStorage/GoogleDrive-tsunoda799@gmail.com/マイドライブ/Kindle/<BOOK_TITLE>/画像_<RUN_ID>"
+# 7. _outputs/kindle-capture/ へ PDF だけ移動（元画像は kindle-app/kindle-captures/ に残す）
+mkdir -p "~/Workspace/_outputs/kindle-capture/<BOOK_TITLE>"
+mv "./<BOOK_TITLE>.pdf" "~/Workspace/_outputs/kindle-capture/<BOOK_TITLE>/<BOOK_TITLE>.pdf"
+
+# 8. to-md チェーン（既定実行 / opt-out）
+#    ユーザーが MD 不要を明示していない限り、続けて to-md Skill を呼ぶ
+/to-md "~/Workspace/_outputs/kindle-capture/<BOOK_TITLE>/<BOOK_TITLE>.pdf"
 ```
 
 ### パターン2: 部分キャプチャ（範囲指定）
@@ -432,6 +468,12 @@ python src/trim.py --input ./kindle-captures/<ASIN>/ --crop "310,120,3270,1950"
 4. 検索結果から書籍を選択
 5. URLからASINを抽出（例: `https://read.amazon.co.jp/?asin=B0DSKPTJM5`）
 6. `source venv/bin/activate && python src/capture.py --asin <ASIN> --layout double` を実行
+   - **exit code 78（FixedLayoutBookError）を返したら、自動的に app ルートにフォールバックする**:
+     1. `open -a "Amazon Kindle" && sleep 3`
+     2. `open "kindle://book?action=open&asin=<ASIN>" && sleep 5`
+     3. Kindle.app の窓を最小化しない状態にする（最小化のままだと bounds=43px で失敗。詳細は `~/.claude/learning/incidents/kindle-fixed-layout-app-route.md`）
+     4. `python src/capture_app.py --book "<slug>" --process-name Kindle --wait 0.8 --initial-wait 1.0`
+   - capture.py 側の早期 abort は `KindleRenderer` 未生成が 5 連続で発動（約 7.5 秒で判定）
 7. **【必須】マーカーでトリミング位置を決定**:
    - 中程から3-5ページ選択（例: 5,8,10,12）
    - `python src/mark.py --input ./kindle-captures/<ASIN>/ --crop "<値>" --pages "5,8,10,12"` でマーカー描画
@@ -517,6 +559,12 @@ python src/trim.py --input ./kindle-captures/<ASIN>/ --crop "310,120,3270,1950"
 3. `view_image` で表紙を読み取り、適切な書籍名で命名
 4. `python src/capture_app.py --book "<BOOK_TITLE>"` を実行
 5. `python src/create_pdf.py --input ./kindle-captures/<BOOK_TITLE>/` を実行
+6. ユーザーが MD 不要を明示していなければ `/to-md "<PDF パス>"` を続けて呼ぶ（既定実行 / opt-out）
+
+**「PDFだけ / MD不要 / テキスト化不要」と明示されたとき**:
+1. 通常のワークフローを実行
+2. **ステップ6（to-md チェーン）はスキップ**
+3. 完了報告には PDF パスのみ記載
 
 **「この本の100ページ目から200ページ目までPDF化」**:
 1. ページ番号とKindleの位置番号の違いを説明（必要に応じて）
