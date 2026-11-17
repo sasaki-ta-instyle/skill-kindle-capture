@@ -13,13 +13,18 @@ Kindle Web Readerから書籍のスクリーンショットを自動取得し、
 
 ## エージェント運用ルール（必読）
 
+- **既定ルートは Kindle.app（`capture_app.py`）**。ユーザーが `--web` / 「Web Reader で」等を明示しない限り、Web Reader (`capture.py`) は使わず Kindle.app ルートで進める。
+  - 理由: Web Reader はフォールバックプロファイル（`~/Library/Application Support/Google/Chrome-Kindle`）が Kindle 未ログイン状態だと `KindleRenderer.initialize` が立たず、`Position range not ready` を 50+ 回ループして詰む（2026-06-16 確認）。Chrome を一旦終了して既存プロファイルを使う解は、ユーザーの作業環境（既存タブ・セッション）を壊すため取らない。
+  - Kindle.app ルートは `open -a "Amazon Kindle"` で起動 → `open "kindle://book?action=open&asin=<ASIN>"` で書籍を開く → 1 ページ目を前面表示 → `capture_app.py` を起動するだけで動く。
+  - Web Reader (`capture.py`) を使うのはユーザーが明示的に指定したとき、または app 側に書籍がダウンロードされていない／取得不能なときの fallback のみ。
 - ユーザーから指示がない限り、**すべてデフォルト設定で実行**する。不要な確認はしない。
 - ローカルmacOSアプリで取得する場合、ユーザーが書籍タイトルを指定しなくても**AIが自動取得**する。
-  - `capture_cover.py --json` → `view_image`で表紙タイトル確認 → 取得タイトルを `--book` に使用
+  - `capture_cover.py --book "<ASIN>_tmp" --asin <ASIN> --json` で表紙だけ撮る（`--book` を仮置きすると `title_helper` のローカル DB 検索（ハング要因）を回避できる） → `view_image` で表紙の書名を読み取り → 取得タイトルを `--book` に使用
 - 取得に失敗・判別不能な場合のみ、最小限の確認を行う。
 - **PDF生成前に、`src/dedupe_tail.py` で巻末末尾の重複ページを必ず検出・削除する**（末尾の連続ページで同一画像が続く場合は重複として除去する）。
 - **PDF生成後は、親フォルダを日本語の書籍タイトル名にし、その直下にPDFと画像フォルダを配置して `_outputs/kindle-capture/` へ必ず移動する**（`~/Workspace/_outputs/kindle-capture`）。
 - **PDF 生成・`_outputs/kindle-capture/` 配置が終わった直後、to-md Skill を既定で起動する**（opt-out 方式）。`/to-md "<生成した PDF のフルパス>"` を呼び、`_outputs/to-md/<書名>.md` を生成する。実行前に日本語 1 文で「続けて to-md で Markdown 化します」と宣言する。ユーザーが直前メッセージで「MD不要 / PDFだけ / Markdownはいい / テキスト化不要」等を明示している場合のみスキップ。
+- **to-md 完了直後、書籍ディレクトリ内の元 PNG (`*.png`) を自動削除する**（opt-out 方式）。PDF は保持。PNG は PDF 生成のための中間素材なので、PDF + MD が揃った時点で不要になる。`find "<書名フォルダ>" -iname "*.png" -delete` で削除し、削除件数と解放サイズを日本語 1 文で報告する（例: 「元 PNG 134 枚（221MB）を削除しました」）。ユーザーが「PNG 残して / 元画像残して / スクショ保持」を明示した場合のみスキップ。**削除条件**（両方満たすときのみ実行）: (a) 書名フォルダ内に対応 PDF が存在する、(b) to-md が完了して `_outputs/to-md/<書名>.md` が生成されている。to-md が失敗・中断・スキップした場合は PNG を残す（再実行の余地 or ユーザー判断のため）。
 - to-md は画像 PDF を Tesseract OCR で処理する（既定 `--lang auto`）。300 ページ超の書籍は kindle-capture の 20〜30 分に **OCR 追加 5〜15 分** が乗る前提でタイムアウトを設定しない。
 - **完了報告では PDF と MD の両フルパスを並記する**（チェーン実行時）。MD 冒頭 frontmatter の `ocr_lang` が想定と違っていたら、`/to-md "<pdf>" --lang jpn_vert+jpn+eng --psm 5` で再実行する手順を案内する。
 - **PDF パスに半角スペースが含まれる場合**（Dropbox パス等）は、`/to-md` の引数を必ず `"..."` で囲う。
@@ -60,6 +65,8 @@ pip install -r requirements.txt
 ```
 
 ## 基本的な使い方
+
+> **既定ルートは Kindle.app（後述 ｢標準フロー（Kindle.app・既定）｣ セクション）**。以下の Web Reader 経由フロー（capture.py）は、ユーザーが `--web` 等を明示したときのみ使う。
 
 **重要**: トリミングは必須ステップです。UIが映り込んでいても無視し、本体ページの四隅（紙面の外枠）に合わせてトリミングします。
 
@@ -133,20 +140,46 @@ OCR 言語の補正: MD 冒頭の frontmatter `ocr_lang` を確認し、想定�
 
 完了報告: PDF と MD の両フルパスを並記する。
 
-## ローカル（Kindle macOSアプリ）
+## 標準フロー（Kindle.app・既定）
 
-### 表紙1枚で命名（AI視認の標準フロー）
+ユーザーが `--web` 等を明示しない限り、**このルートが既定**。
+
+### Step 0: ASIN 確定 + 期待書名の独立取得（必須）
+
+ユーザーが ASIN / 短縮 URL（amzn.asia / amzn.to）/ Amazon 商品 URL のいずれかを渡してきたら、**Kindle.app に触る前に書名を独立に確定する**。
+
+1. ASIN を確定:
+   - 短縮 URL → `WebFetch` でリダイレクト先を取って `/dp/<ASIN>/` を抽出（curl では JS redirect を追えず失敗するので `WebFetch` を使う）
+   - 商品 URL なら `/dp/<ASIN>` を直接読む
+2. **ASIN だけでなく書名を必ず取る**: `WebSearch` で `"<ASIN>" site:amazon.co.jp` を投げる（または書名キーワードで検索）。取得した書名を `<EXPECTED_TITLE>` として保持
+3. ユーザーが書名で本を指定してきた場合（ASIN 不明）も同じく `WebSearch` で ASIN を確定し、書名は `<EXPECTED_TITLE>` に固定する
+
+これを省略すると、後段の `capture_cover.py` で **Kindle.app に前回開いていた別の本の表紙**を撮ってしまい、それを対象書籍と誤認する事故が起きる（2026-06-16 incident、ASIN B0CH4V6CQP）。
+
+### Step 1: 事前準備（ユーザーに依頼すること）
+
+1. Kindle.app の窓を **前面**に出す（最小化しない。最小化すると bounds=43px で失敗）
+2. キャプチャ対象書籍を **1 ページ目** に戻す
+3. 画面に被っているシステムダイアログ（権限要求等）があれば応答して閉じる
+
+### Step 2: 表紙キャプチャ + 期待書名との照合（必須）
 
 ```bash
 source venv/bin/activate
-python src/capture_cover.py --json
+# --book に仮値を入れて title_helper のローカル DB 検索（ハング要因）を回避
+python src/capture_cover.py --book "<ASIN>_tmp" --asin <ASIN> --json
 ```
 
-1. `kindle-captures/<ASIN>/cover.png` を `view_image` で確認
-2. 表紙のタイトルを読み取り、適切な書籍名で命名する
-3. 必要なら出力ディレクトリ名と `metadata.json` の `book` を更新
+1. `kindle-captures/<ASIN>_tmp/cover.png` を `view_image` で確認
+2. **表紙の書名と Step 0 の `<EXPECTED_TITLE>` を比較する**。これが Step 0 を入れた本来の目的
+3. 一致したら Step 3 へ進む
+4. **一致しない場合**は「Kindle.app の前面が対象本ではない」状態:
+   - `kindle://book?action=open&asin=<ASIN>` だけでは遷移しないケースが多い（前回読書中の本が居座る）
+   - **(既定) ユーザーに依頼**: 「Kindle.app のライブラリで『`<EXPECTED_TITLE>`』をダブルクリックで開いて、1 ページ目に戻して合図してください」と日本語で頼む
+   - 合図 → `capture_cover.py` 再実行 → 再度照合。一致するまで capture_app.py に進まない
+5. キャプチャされた窓が Kindle.app でないとき（別アプリが前面）は、`osascript -e 'tell application "Amazon Kindle" to activate'` で前面化してから撮り直す。Stage Manager / 別 Space で activate が効かないときもユーザー依頼に切り替える
 
-**注意**: 表紙が表示されている状態で実行すること（現在表示中のページを撮影）。
+**自動化禁止**: 表紙照合をスキップして `capture_app.py` に進むのは禁止。Kindle.app の現在表示中ページが対象書籍と限らない以上、毎回照合する。
 
 ### 全ページキャプチャ
 
